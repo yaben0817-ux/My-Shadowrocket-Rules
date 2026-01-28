@@ -1,13 +1,12 @@
 /**
- * iCost AI - 统计脚本（精简通知版）
+ * iCost AI - 统计脚本（三行通知版）
  * - http-request：记录开始时间 & model（按 $request.id 隔离，避免并发串台）
  * - http-response：计算耗时、解析本次生成记录(results.length)、解析输入/输出tokens，并发通知
  *
- * 通知格式（固定标题）：
- * 模型: xxx
- * 耗时: 2.37s
- * 生成记录: 6  平均耗时: 0.40s
- * ⬆️In: 2715  ⬇️Out: 75
+ * 通知格式（固定标题，三行）：
+ * 1) 模型: xxx
+ * 2) 耗时: 2.37s  生成记录: 6  平均耗时: 0.40s
+ * 3) ⬆️In: 2715  ⬇️Out: 75
  */
 
 const STORE_PREFIX_REQ = "iCost_req_";
@@ -31,11 +30,7 @@ const PHASE = args.phase || "response"; // request | response
 
 // ========== 工具 ==========
 function safeJsonParse(s) {
-  try {
-    return JSON.parse(s);
-  } catch (_) {
-    return null;
-  }
+  try { return JSON.parse(s); } catch (_) { return null; }
 }
 
 function msToSecText(ms) {
@@ -47,7 +42,7 @@ function num(n) {
   return Number.isFinite(n) ? n : 0;
 }
 
-// ========== 平台识别（用于存储，通知标题现在固定所以不展示） ==========
+// ========== 平台识别（内部用，不展示） ==========
 function getPlatform(url) {
   if (!url) return "Unknown";
   if (url.includes("api.deepseek.com")) return "DeepSeek";
@@ -73,19 +68,13 @@ function extractJsonTextFromContent(content) {
   if (!content || typeof content !== "string") return null;
   let s = content.trim();
 
-  // 去掉 Markdown code block
   if (s.startsWith("```")) {
     const firstNewline = s.indexOf("\n");
-    if (firstNewline !== -1) {
-      s = s.slice(firstNewline + 1);
-    }
-    if (s.endsWith("```")) {
-      s = s.slice(0, -3);
-    }
+    if (firstNewline !== -1) s = s.slice(firstNewline + 1);
+    if (s.endsWith("```")) s = s.slice(0, -3);
     s = s.trim();
   }
 
-  // 保守策略：必须以 { 或 [ 开头才当JSON
   if (!(s.startsWith("{") || s.startsWith("["))) return null;
   return s;
 }
@@ -100,9 +89,7 @@ function getResultCountFromResponse(respObj) {
     if (!contentObj || typeof contentObj !== "object") return 0;
 
     const results = contentObj.results;
-    if (Array.isArray(results)) return results.length;
-
-    return 0;
+    return Array.isArray(results) ? results.length : 0;
   } catch (_) {
     return 0;
   }
@@ -115,8 +102,8 @@ function getUsage(respObj) {
 
   const prompt = Number(u.prompt_tokens || 0);
   const completion = Number(u.completion_tokens || 0);
-
   const has = Number.isFinite(prompt) || Number.isFinite(completion);
+
   return {
     prompt: Number.isFinite(prompt) ? prompt : 0,
     completion: Number.isFinite(completion) ? completion : 0,
@@ -130,7 +117,7 @@ function getUsage(respObj) {
     const url = $request?.url || "";
     const platform = getPlatform(url);
 
-    // ========== request 阶段 ==========
+    // request 阶段：写入开始时间（按 request.id 隔离）
     if (PHASE === "request") {
       const start = Date.now();
       const model = getRequestModel($request?.body || "");
@@ -138,20 +125,15 @@ function getUsage(respObj) {
       const reqId = $request?.id || "";
       const key = STORE_PREFIX_REQ + (reqId || "NO_ID");
 
-      $persistentStore.write(
-        JSON.stringify({ t: start, model, platform }),
-        key
-      );
-
+      $persistentStore.write(JSON.stringify({ t: start, model, platform }), key);
       $done({});
       return;
     }
 
-    // ========== response 阶段 ==========
+    // response 阶段
     const respBody = $response?.body || "";
     const respObj = safeJsonParse(respBody);
 
-    // 读取 request 阶段存的数据
     const reqId = $request?.id || "";
     const storeKey = STORE_PREFIX_REQ + (reqId || "NO_ID");
     const storedRaw = $persistentStore.read(storeKey);
@@ -165,11 +147,11 @@ function getUsage(respObj) {
         startTime = stored.t;
         if (typeof stored.model === "string" && stored.model) model = stored.model;
       }
-      // 清理，避免堆积
+      // 清理
       $persistentStore.write("", storeKey);
     }
 
-    // fallback：如果 request 没拿到 model，尝试从响应拿
+    // fallback：响应里有 model 就用
     if (model === "Unknown" && typeof respObj?.model === "string" && respObj.model.trim()) {
       model = respObj.model.trim();
     }
@@ -185,18 +167,15 @@ function getUsage(respObj) {
       avgText = msToSecText(durationMs / resultCount);
     }
 
-    // 通知（按你指定格式）
+    // 三行通知
     const title = "🤖 iCost AI 服务监控";
-    const lines = [];
-    lines.push(`模型: ${model}`);
-    lines.push(`耗时: ${msToSecText(durationMs)}`);
-    lines.push(`生成记录: ${resultCount}  平均耗时: ${avgText}`);
-
+    const line1 = `模型: ${model}`;
+    const line2 = `耗时: ${msToSecText(durationMs)}  生成记录: ${resultCount}  平均耗时: ${avgText}`;
     const inTok = usage && usage.has ? num(usage.prompt) : "-";
     const outTok = usage && usage.has ? num(usage.completion) : "-";
-    lines.push(`⬆️In: ${inTok}  ⬇️Out: ${outTok}`);
+    const line3 = `⬆️In: ${inTok}  ⬇️Out: ${outTok}`;
 
-    const body = lines.join("\n");
+    const body = [line1, line2, line3].join("\n");
     $notification.post(title, "", body);
 
     $done({});
