@@ -1,11 +1,12 @@
 /**
- * iCost Pro - 历史统计增强版 (精准计数修正版)
- * 功能：✅ 过滤无效请求  ✅ 仅统计成功生成的对话  ✅ 修正历史计数逻辑
+ * iCost Pro - 最终修正版
+ * 修复问题：流式传输(Stream)下计数丢失的问题
+ * 逻辑对齐：与原作者逻辑一致，只要是有效响应即计数
  */
 
 // 1. 定义存储 Key
 const storageKey_Start = "iCost_Start_Timestamp";
-const storageKey_Stats = "iCost_History_Data";
+const storageKey_Stats = "iCost_History_Stats_v2"; // 升级 Key 版本，避免旧数据干扰
 
 // 2. 辅助函数：根据 URL 判断平台
 function getPlatform(url) {
@@ -20,7 +21,7 @@ function getPlatform(url) {
     return "AI Service";
 }
 
-// 3. 辅助函数：更新历史统计数据 (核心修改：增加有效性判断)
+// 3. 辅助函数：更新历史统计
 function updateHistoryStats(currentDurationMs) {
     let statsStr = $persistentStore.read(storageKey_Stats);
     let stats = { total_count: 0, total_time_ms: 0 };
@@ -29,71 +30,83 @@ function updateHistoryStats(currentDurationMs) {
         try {
             stats = JSON.parse(statsStr);
         } catch (e) {
-            console.log("iCost Data Reset");
+            console.log("iCost: History Data Reset");
         }
     }
 
-    // 只有在被显式调用时才累加
+    // 累加数据
     stats.total_count += 1;
     stats.total_time_ms += currentDurationMs;
 
+    // 保存
     $persistentStore.write(JSON.stringify(stats), storageKey_Stats);
 
+    // 计算平均值
     let avg_s = (stats.total_time_ms / stats.total_count / 1000).toFixed(2);
     return { count: stats.total_count, avg_s: avg_s };
 }
 
 // 4. 主逻辑
 if (typeof $response === 'undefined') {
-    // === Request 阶段 ===
+    // === Request 阶段：只负责记录开始时间 ===
     $persistentStore.write(Date.now().toString(), storageKey_Start);
     $done({});
 } else {
     // === Response 阶段 ===
     let startTime = $persistentStore.read(storageKey_Start);
     
-    // 只有当有开始时间时才处理，防止重复触发
     if (startTime) {
         let durationMs = Date.now() - parseInt(startTime);
         let durationSec = (durationMs / 1000).toFixed(2);
         
-        // 解析 Body
         let body = $response.body;
         try {
             if (body) {
                 let obj = JSON.parse(body);
                 
-                // 🔥 核心修正：只有当 usage 存在时，才进行计数和计算 🔥
-                if (obj.usage) {
-                    // 1. 此时才调用更新历史数据的函数
+                // 🔥 核心修正 🔥
+                // 只要包含 'model' (模型名) 或 'choices' (回复内容) 或 'usage'，都视为有效对话
+                // 这样即使 Stream 模式没返回 Token，也能准确记录耗时和条数
+                if (obj.model || obj.choices || obj.usage) {
+                    
+                    // 1. 立即更新历史统计 (确保计数准确)
                     let history = updateHistoryStats(durationMs);
                     
-                    // 2. 提取数据
-                    let modelName = obj.model || "Unknown";
+                    // 2. 尝试提取 Token (如果没有则显示 0)
+                    let prompt = 0;
+                    let completion = 0;
+                    if (obj.usage) {
+                        prompt = obj.usage.prompt_tokens || 0;
+                        completion = obj.usage.completion_tokens || 0;
+                    }
+
+                    // 3. 提取基础信息
+                    let modelName = obj.model || "Unknown Model";
                     let platformName = getPlatform($request.url);
-                    const prompt = obj.usage.prompt_tokens || 0;
-                    const completion = obj.usage.completion_tokens || 0;
                     
-                    // 3. 组合文案
-                    let timeInfo = `请求耗时: ${durationSec} s`;
-                    let historyInfo = `生成记录: ${history.count} 条, 平均: ${history.avg_s} s/条`;
+                    // 4. 组装通知
+                    // 格式：DeepSeek | r1
+                    //      请求耗时: 1.5s
+                    //      生成记录: 5 条, 平均: 1.2s/条 
+                    //      ⬆️In: 50  ⬇️Out: 100
                     let tokenStr = `⬆️In: ${prompt}  ⬇️Out: ${completion}`;
-                    
-                    // 4. 发送通知
+                    // 如果没有 Token，加个提示
+                    if (prompt === 0 && completion === 0) {
+                        tokenStr += " (Stream模式无Token)";
+                    }
+
                     $notification.post(
                         `${platformName} | ${modelName}`,
-                        `${timeInfo}`,
-                        `${historyInfo}\n${tokenStr}`
+                        `请求耗时: ${durationSec} s`,
+                        `生成记录: ${history.count} 条, 平均: ${history.avg_s} s/条\n${tokenStr}`
                     );
-                } else {
-                    console.log("iCost: 本次响应无 Token 信息，不计入历史统计。");
                 }
             }
         } catch (e) {
             console.log("iCost Error: " + e);
         }
         
-        // 无论成功失败，都清理开始时间，防止下一次误判
+        // 清理时间，防止重复
         $persistentStore.write(null, storageKey_Start);
     }
     
