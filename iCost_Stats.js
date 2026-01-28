@@ -1,16 +1,18 @@
 /**
- * iCost Pro - 3秒会话累计版
- * 核心逻辑：
- * 1. 自动检测“连续请求”：3秒内的请求会自动累加计数。
- * 2. 超过3秒没有新请求，自动重置为1，视为新的一批。
- * 3. 完美适配“批量上传”场景。
+ * iCost Pro - 固定标题极简版
+ * 核心功能：
+ * 1. 标题固定显示为 "🤖 iCost AI 服务监控"
+ * 2. 内容只显示：平台模型 + 耗时 + Token
+ * 3. 逻辑纯净，无历史累计
  */
 
-// 定义存储 Key
+// 1. 定义存储 Key
 const storageKey_Start = "iCost_Start_Timestamp";
-const storageKey_Session = "iCost_Session_Data";
 
-// 辅助函数：判断平台
+// 2. 固定标题 (这里就是你要修改的标题文字)
+const NOTIFICATION_TITLE = "🤖 iCost AI 服务监控";
+
+// 3. 辅助函数：判断平台
 function getPlatform(url) {
     if (url.includes("deepseek")) return "DeepSeek";
     if (url.includes("volces")) return "火山引擎";
@@ -23,7 +25,7 @@ function getPlatform(url) {
     return "AI Service";
 }
 
-// 主逻辑
+// 4. 主逻辑
 if (typeof $response === 'undefined') {
     // === Request 阶段 ===
     $persistentStore.write(Date.now().toString(), storageKey_Start);
@@ -33,60 +35,43 @@ if (typeof $response === 'undefined') {
     let startTime = $persistentStore.read(storageKey_Start);
     
     if (startTime) {
-        let now = Date.now();
-        let durationMs = now - parseInt(startTime);
+        let durationMs = Date.now() - parseInt(startTime);
+        let durationSec = (durationMs / 1000).toFixed(2);
         
-        // 1. 读取之前的会话数据
-        let sessionData = { count: 0, input: 0, output: 0, lastTime: 0 };
-        let sessionStr = $persistentStore.read(storageKey_Session);
-        if (sessionStr) {
-            try { sessionData = JSON.parse(sessionStr); } catch(e) {}
-        }
-
-        // 2. 判断是否属于“同一批次” 
-        // 🔥 修改点：这里改成了 3000 (即 3秒) 🔥
-        if (now - sessionData.lastTime > 3000) {
-            // 如果距离上次请求超过 3秒，重置计数器
-            sessionData = { count: 0, input: 0, output: 0, lastTime: 0 };
-        }
-
-        // 3. 解析本次 Token
         let body = $response.body;
-        let currentPrompt = 0;
-        let currentCompletion = 0;
-        let modelName = "Unknown";
-        
         try {
             if (body) {
                 let obj = JSON.parse(body);
-                modelName = obj.model || "Unknown";
-                if (obj.usage) {
-                    currentPrompt = obj.usage.prompt_tokens || 0;
-                    currentCompletion = obj.usage.completion_tokens || 0;
+                
+                // 只要是有效响应
+                if (obj.model || obj.usage || obj.choices || obj.candidates) {
+                    
+                    let modelName = obj.model || "Unknown";
+                    let platformName = getPlatform($request.url);
+                    
+                    // 提取 Token
+                    let prompt = 0;
+                    let completion = 0;
+                    if (obj.usage) {
+                        prompt = obj.usage.prompt_tokens || 0;
+                        completion = obj.usage.completion_tokens || 0;
+                    }
+                    
+                    // 组合显示内容
+                    // 第一行参数：固定标题
+                    // 第二行参数：副标题 (平台 | 模型)
+                    // 第三行参数：正文 (耗时 + Token)
+                    $notification.post(
+                        NOTIFICATION_TITLE,
+                        `${platformName} | ${modelName}`,
+                        `请求耗时: ${durationSec} s\n⬆️In: ${prompt}  ⬇️Out: ${completion}`
+                    );
                 }
             }
-        } catch (e) {}
-
-        // 4. 累加数据
-        sessionData.count += 1;
-        sessionData.input += currentPrompt;
-        sessionData.output += currentCompletion;
-        sessionData.lastTime = now; // 更新最后活动时间
-
-        // 5. 保存回存储
-        $persistentStore.write(JSON.stringify(sessionData), storageKey_Session);
-
-        // 6. 计算显示数据
-        let platformName = getPlatform($request.url);
-        let durationSec = (durationMs / 1000).toFixed(2);
-
-        $notification.post(
-            `${platformName} | ${modelName}`,
-            `请求耗时: ${durationSec} s`,
-            `本批次已处理: ${sessionData.count} 张/条\n⬆️In: ${sessionData.input}  ⬇️Out: ${sessionData.output}`
-        );
+        } catch (e) {
+            // console.log("iCost Error");
+        }
         
-        // 清理 Request 时间
         $persistentStore.write(null, storageKey_Start);
     }
     
