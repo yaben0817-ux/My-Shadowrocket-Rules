@@ -1,14 +1,15 @@
 /**
- * iCost Pro - 最终修正版
- * 修复问题：流式传输(Stream)下计数丢失的问题
- * 逻辑对齐：与原作者逻辑一致，只要是有效响应即计数
+ * iCost Pro - 智能记账识别版 (最终版)
+ * 功能清单：
+ * 1. ✅ 智能识别批量单据数量 (1张图算1条, 5张图算5条)
+ * 2. ✅ 精准统计 Token (In/Out)
+ * 3. ✅ 计算单张单据的平均处理耗时
  */
 
 // 1. 定义存储 Key
 const storageKey_Start = "iCost_Start_Timestamp";
-const storageKey_Stats = "iCost_History_Stats_v2"; // 升级 Key 版本，避免旧数据干扰
 
-// 2. 辅助函数：根据 URL 判断平台
+// 2. 辅助函数：判断平台
 function getPlatform(url) {
     if (url.includes("deepseek")) return "DeepSeek";
     if (url.includes("volces")) return "火山引擎";
@@ -21,38 +22,44 @@ function getPlatform(url) {
     return "AI Service";
 }
 
-// 3. 辅助函数：更新历史统计
-function updateHistoryStats(currentDurationMs) {
-    let statsStr = $persistentStore.read(storageKey_Stats);
-    let stats = { total_count: 0, total_time_ms: 0 };
-    
-    if (statsStr) {
-        try {
-            stats = JSON.parse(statsStr);
-        } catch (e) {
-            console.log("iCost: History Data Reset");
+// 3. 核心算法：智能计算业务条数
+function calculateItemCount(obj) {
+    try {
+        // 尝试获取回复内容
+        let content = "";
+        if (obj.choices && obj.choices.length > 0) {
+            content = obj.choices[0].message.content || "";
+        } else if (obj.candidates && obj.candidates.length > 0) {
+            content = obj.candidates[0].content.parts[0].text || ""; // 兼容 Gemini
+        } else if (obj.output) {
+             content = obj.output; // 兼容部分国产模型
         }
+
+        if (!content) return 1; 
+
+        // 清洗 Markdown 标记
+        let cleanJson = content.replace(/```json/g, "").replace(/```/g, "").trim();
+
+        // 尝试解析 JSON 数组长度
+        if (cleanJson.startsWith("[") || cleanJson.startsWith("{")) {
+            let parsed = JSON.parse(cleanJson);
+            if (Array.isArray(parsed)) return parsed.length; // 直接返回数组长度
+            if (parsed.items && Array.isArray(parsed.items)) return parsed.items.length;
+            if (parsed.data && Array.isArray(parsed.data)) return parsed.data.length;
+        }
+    } catch (e) {
+        // 解析失败按 1 条算
     }
-
-    // 累加数据
-    stats.total_count += 1;
-    stats.total_time_ms += currentDurationMs;
-
-    // 保存
-    $persistentStore.write(JSON.stringify(stats), storageKey_Stats);
-
-    // 计算平均值
-    let avg_s = (stats.total_time_ms / stats.total_count / 1000).toFixed(2);
-    return { count: stats.total_count, avg_s: avg_s };
+    return 1; 
 }
 
 // 4. 主逻辑
 if (typeof $response === 'undefined') {
-    // === Request 阶段：只负责记录开始时间 ===
+    //Request
     $persistentStore.write(Date.now().toString(), storageKey_Start);
     $done({});
 } else {
-    // === Response 阶段 ===
+    //Response
     let startTime = $persistentStore.read(storageKey_Start);
     
     if (startTime) {
@@ -64,15 +71,16 @@ if (typeof $response === 'undefined') {
             if (body) {
                 let obj = JSON.parse(body);
                 
-                // 🔥 核心修正 🔥
-                // 只要包含 'model' (模型名) 或 'choices' (回复内容) 或 'usage'，都视为有效对话
-                // 这样即使 Stream 模式没返回 Token，也能准确记录耗时和条数
-                if (obj.model || obj.choices || obj.usage) {
+                // 只要是有效响应
+                if (obj.choices || obj.candidates || obj.output || obj.usage) {
                     
-                    // 1. 立即更新历史统计 (确保计数准确)
-                    let history = updateHistoryStats(durationMs);
+                    let modelName = obj.model || "Unknown";
+                    let platformName = getPlatform($request.url);
                     
-                    // 2. 尝试提取 Token (如果没有则显示 0)
+                    // A. 智能计算条数
+                    let recordCount = calculateItemCount(obj);
+                    
+                    // B. 提取 Token (这里就是你要的功能)
                     let prompt = 0;
                     let completion = 0;
                     if (obj.usage) {
@@ -80,25 +88,22 @@ if (typeof $response === 'undefined') {
                         completion = obj.usage.completion_tokens || 0;
                     }
 
-                    // 3. 提取基础信息
-                    let modelName = obj.model || "Unknown Model";
-                    let platformName = getPlatform($request.url);
+                    // C. 计算平均耗时
+                    let avgTimePerItem = (durationMs / recordCount).toFixed(0);
+
+                    // D. 发送通知
+                    // 格式：
+                    // 请求耗时: 2.50 s
+                    // 识别单据: 5 张, 平均: 500 ms/张
+                    // ⬆️In: 1500  ⬇️Out: 3000
                     
-                    // 4. 组装通知
-                    // 格式：DeepSeek | r1
-                    //      请求耗时: 1.5s
-                    //      生成记录: 5 条, 平均: 1.2s/条 
-                    //      ⬆️In: 50  ⬇️Out: 100
                     let tokenStr = `⬆️In: ${prompt}  ⬇️Out: ${completion}`;
-                    // 如果没有 Token，加个提示
-                    if (prompt === 0 && completion === 0) {
-                        tokenStr += " (Stream模式无Token)";
-                    }
+                    if (prompt === 0 && completion === 0) tokenStr += " (无Token数据)";
 
                     $notification.post(
                         `${platformName} | ${modelName}`,
                         `请求耗时: ${durationSec} s`,
-                        `生成记录: ${history.count} 条, 平均: ${history.avg_s} s/条\n${tokenStr}`
+                        `识别单据: ${recordCount} 张, 平均: ${avgTimePerItem} ms/张\n${tokenStr}`
                     );
                 }
             }
@@ -106,7 +111,6 @@ if (typeof $response === 'undefined') {
             console.log("iCost Error: " + e);
         }
         
-        // 清理时间，防止重复
         $persistentStore.write(null, storageKey_Start);
     }
     
